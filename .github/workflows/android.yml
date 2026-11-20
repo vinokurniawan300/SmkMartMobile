@@ -1,0 +1,94 @@
+name: android
+
+on:
+  push:
+    branches: [ main ]
+    tags: [ 'v*' ]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  apk:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: '11.0.x'
+          dotnet-quality: 'ga'
+
+      - uses: actions/setup-java@v5
+        with:
+          distribution: microsoft
+          java-version: '17'
+
+      - name: Tentukan versi
+        id: ver
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            v="${GITHUB_REF_NAME#v}"
+          else
+            v="1.0.1"
+          fi
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+
+      - name: Pasang workload MAUI Android
+        run: dotnet workload install maui-android
+
+      - name: Siapkan keystore (opsional)
+        id: ks
+        env:
+          KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+        run: |
+          if [ -n "$KEYSTORE_BASE64" ]; then
+            echo "$KEYSTORE_BASE64" | base64 -d > "$RUNNER_TEMP/smkmart.keystore"
+            echo "ada=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "ada=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Build APK
+        env:
+          KS_PASS: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          KS_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          KEY_PASS: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          args=(
+            -f net11.0-android -c Release
+            -p:AndroidPackageFormat=apk
+            -p:ApplicationDisplayVersion=${{ steps.ver.outputs.version }}
+            -p:ApplicationVersion=${{ github.run_number }}
+          )
+          if [ "${{ steps.ks.outputs.ada }}" = "true" ]; then
+            args+=(
+              -p:AndroidKeyStore=true
+              -p:AndroidSigningKeyStore="$RUNNER_TEMP/smkmart.keystore"
+              -p:AndroidSigningKeyAlias="$KS_ALIAS"
+              -p:AndroidSigningStorePass=env:KS_PASS
+              -p:AndroidSigningKeyPass=env:KEY_PASS
+            )
+          fi
+          dotnet publish src/SmkMart.Android/SmkMart.Android.csproj "${args[@]}"
+
+      - name: Kumpulkan APK
+        run: |
+          mkdir -p apk-output
+          apk=$(find src/SmkMart.Android/bin -name '*-Signed.apk' | head -n 1)
+          if [ -z "$apk" ]; then apk=$(find src/SmkMart.Android/bin -name '*.apk' | head -n 1); fi
+          echo "APK: $apk"
+          cp "$apk" "apk-output/SmkMart-${{ steps.ver.outputs.version }}.apk"
+
+      - uses: actions/upload-artifact@v6
+        with:
+          name: SmkMart-APK
+          path: apk-output/*.apk
+
+      - name: Rilis di GitHub (hanya saat tag v*)
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v3
+        with:
+          files: apk-output/*.apk
